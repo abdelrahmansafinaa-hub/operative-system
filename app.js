@@ -233,7 +233,7 @@ async function viewDashboard() {
       ['إجمالي الطلبات', s.total], ['قيد التجهيز', s.new], ['في الطريق', s.in_transit, 'indigo'],
       ['تم التسليم', s.delivered, 'green'], ['مرتجع', s.returned, 'red'], ['نسبة التسليم', `${rate}%`],
       ['تحصيل متوقع (طلبات مفتوحة)', egp(s.cod_pending)], ['المحصّل', egp(s.collected), 'green'],
-      [S.isAdmin ? 'إيرادات الشركة' : 'إجمالي الرسوم', egp(s.fees)],
+      [S.isAdmin ? 'إيرادات الشركة' : 'إجمالي التكلفة', egp(s.fees)],
       [S.isAdmin ? 'مستحقات العملاء غير المسوّاة' : 'رصيدك المستحق غير المسوّى', egp(all.unsettled_net), 'primary'],
     ];
     $('#dCards').innerHTML = cards.map(([l, v, c]) =>
@@ -260,9 +260,9 @@ async function viewDashboard() {
     const { data: rates } = await sb.from('client_shipping_rates').select('*').eq('client_id', c.id).order('governorate');
     $('#dExtra').innerHTML = `<div class="panel"><div class="panel-h">أسعار الخدمة الخاصة بك</div><div class="panel-b">
       <dl class="kv"><dt>التجهيز والتغليف</dt><dd>${egp(c.fulfillment_fee)} / طلب</dd>
-      <dt>عمولة التحصيل</dt><dd>${money(c.cod_fee_percent)}% من المبلغ المحصّل</dd>
       <dt>المرتجع (أساسي)</dt><dd>${egp(c.return_fee)}</dd>
       <dt>الشحن (أساسي)</dt><dd>${egp(c.default_shipping_fee)}</dd></dl>
+      <p class="hint" style="margin:10px 0 0">الطلب المسلَّم: الصافي = المبلغ المحصّل − (الشحن + التجهيز). الطلب المرتجع: الصافي = المبلغ المحصّل إن وُجد − (المرتجع + التجهيز).</p>
       ${rates && rates.length ? `<div class="section-title">الأسعار حسب المحافظة</div>
         <div class="table-wrap"><table class="t"><thead><tr><th>المحافظة</th><th>الشحن</th><th>المرتجع</th></tr></thead><tbody>
         ${rates.map(r => `<tr><td>${esc(r.governorate)}</td><td>${egp(r.price ?? c.default_shipping_fee)}</td><td>${egp(r.return_price ?? c.return_fee)}</td></tr>`).join('')}
@@ -294,8 +294,10 @@ function ordersQuery(select = '*', withCount = true) {
 async function viewOrders() {
   setTitle(S.isAdmin ? 'الطلبات' : 'طلباتي');
   $('#pageActions').innerHTML = `<button class="btn" id="exportBtn">تصدير إلى Excel</button>
+    <button class="btn" id="importBtn">رفع طلبات من Excel</button>
     <button class="btn primary" id="addOrderBtn">+ طلب جديد</button>`;
   $('#addOrderBtn').onclick = () => openOrder(null);
+  $('#importBtn').onclick = openImport;
   $('#exportBtn').onclick = e => busy(e.currentTarget, exportOrders);
   selected = new Set();
   $('#view').innerHTML = `<div class="toolbar">
@@ -371,7 +373,7 @@ async function exportOrders() {
     ['customer_phone', 'الهاتف'], ['customer_phone2', 'هاتف آخر'], ['governorate', 'المحافظة'], ['city', 'المنطقة'],
     ['address', 'العنوان'], ['items', 'المحتوى'], ['pieces', 'القطع'], ['cod_amount', 'التحصيل'], ['allow_open', 'مسموح بالفتح'],
     ['notes', 'ملاحظات'], ['status', 'الحالة'], ['qp_tracking', 'رقم التتبع'], ['collected_amount', 'المحصّل'],
-    ['shipping_fee', 'الشحن'], ['fulfillment_fee', 'التجهيز'], ['cod_fee', 'عمولة التحصيل'], ['return_fee', 'رسوم المرتجع'],
+    ['shipping_fee', 'الشحن'], ['fulfillment_fee', 'التجهيز'], ['return_fee', 'المرتجع'],
     ['net_amount', 'الصافي'], ['created_at', 'التاريخ']];
   const val = (o, k) => k === 'client' ? clientName(o.client_id) : k === 'status' ? STATUS[o.status]?.label
     : k === 'allow_open' ? (o.allow_open ? 'نعم' : 'لا') : k === 'created_at' ? dtt(o.created_at) : o[k];
@@ -406,20 +408,21 @@ async function openOrder(o) {
       <label class="f"><span>الحالة</span><select name="status">${statusOptions(o.status)}</select></label>
       <label class="f"><span>رقم التتبع (QP)</span><input name="qp_tracking" dir="ltr" value="${esc(o.qp_tracking)}"></label>
       <label class="f"><span>حالة الشحنة عند QP</span><input name="qp_status" value="${esc(o.qp_status)}"></label>
-      <label class="f"><span>المبلغ المحصّل <span class="hint">(إذا تُرك فارغًا = المبلغ المطلوب)</span></span><input name="collected_amount" type="number" step="0.01" value="${esc(o.collected_amount)}"></label>
+      <label class="f"><span>المبلغ المحصّل <span class="hint">(المسلَّم: إذا تُرك فارغًا = المطلوب — المرتجع: ما دفعه المستلم إن وُجد)</span></span><input name="collected_amount" type="number" step="0.01" value="${esc(o.collected_amount)}"></label>
       <div class="section-title span-all">الرسوم <span class="hint">— تُحسب تلقائيًا من أسعار العميل، ويمكن تعديلها هنا</span></div>
-      <div class="grid g4 span-all">
+      <div class="grid g3 span-all">
         <label class="f"><span>الشحن</span><input name="shipping_fee" type="number" step="0.01" value="${esc(o.shipping_fee)}"></label>
-        <label class="f"><span>التجهيز</span><input name="fulfillment_fee" type="number" step="0.01" value="${esc(o.fulfillment_fee)}"></label>
-        <label class="f"><span>عمولة التحصيل</span><input name="cod_fee" type="number" step="0.01" value="${esc(o.cod_fee)}"></label>
-        <label class="f"><span>رسوم المرتجع</span><input name="return_fee" type="number" step="0.01" value="${esc(o.return_fee)}"></label>
+        <label class="f"><span>التجهيز والتغليف</span><input name="fulfillment_fee" type="number" step="0.01" value="${esc(o.fulfillment_fee)}"></label>
+        <label class="f"><span>المرتجع</span><input name="return_fee" type="number" step="0.01" value="${esc(o.return_fee)}"></label>
       </div>` : ''}
     ${!isNew ? `<div class="section-title span-all">متابعة الطلب</div>
       <div class="span-all grid g2"><div><ul class="timeline" id="oEvents"><li class="muted">...</li></ul></div>
       <dl class="kv small"><dt>الحالة</dt><dd>${badge(o.status)}</dd>
         ${o.qp_tracking ? `<dt>رقم التتبع</dt><dd><span class="ltr">${esc(o.qp_tracking)}</span></dd>` : ''}
         ${o.qp_status ? `<dt>عند شركة الشحن</dt><dd>${esc(o.qp_status)}</dd>` : ''}
-        <dt>الشحن + التجهيز</dt><dd>${egp(+o.shipping_fee + +o.fulfillment_fee)}</dd>
+        ${o.status === 'returned' ? `<dt>التكلفة (المرتجع + التجهيز)</dt><dd>${egp(+o.return_fee + +o.fulfillment_fee)}</dd>`
+          : `<dt>التكلفة (الشحن + التجهيز)</dt><dd>${egp(+o.shipping_fee + +o.fulfillment_fee)}</dd>`}
+        ${['delivered', 'returned'].includes(o.status) ? `<dt>المحصّل</dt><dd>${egp(o.collected_amount)}</dd>` : ''}
         ${['delivered', 'returned'].includes(o.status) ? `<dt>الصافي</dt><dd>${signed(o.net_amount)} ج</dd>` : ''}
         <dt>التسوية</dt><dd>${o.settlement_id ? 'تمت التسوية' : 'لم تتم بعد'}</dd></dl></div>` : ''}
   </form>`;
@@ -452,7 +455,7 @@ async function openOrder(o) {
     if (A && !isNew) Object.assign(rec, {
       status: f.status, qp_tracking: nz(f.qp_tracking), qp_status: nz(f.qp_status),
       collected_amount: num(f.collected_amount), shipping_fee: num(f.shipping_fee), fulfillment_fee: num(f.fulfillment_fee),
-      cod_fee: num(f.cod_fee), return_fee: num(f.return_fee),
+      return_fee: num(f.return_fee),
     });
     if (isNew) rec.client_id = A ? f.client_id : S.profile.client_id;
     busy(save, async () => {
@@ -480,6 +483,206 @@ async function openOrder(o) {
 }
 
 // =====================================================================
+//  رفع الطلبات من Excel
+// =====================================================================
+const XLSX_URL = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+let xlsxReady = null;
+function loadXLSX() {
+  if (window.XLSX) return Promise.resolve();
+  return xlsxReady || (xlsxReady = new Promise((res, rej) => {
+    const sc = document.createElement('script'); sc.src = XLSX_URL;
+    sc.onload = () => res();
+    sc.onerror = () => { xlsxReady = null; rej(new Error('تعذّر تحميل مكتبة Excel، تحقق من الاتصال بالإنترنت')); };
+    document.head.appendChild(sc);
+  }));
+}
+const toLatinDigits = v => String(v ?? '').replace(/[٠-٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d)).replace(/[۰-۹]/g, d => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d));
+const normAr = v => toLatinDigits(v).trim().toLowerCase().replace(/[أإآٱ]/g, 'ا').replace(/ة/g, 'ه').replace(/ى/g, 'ي')
+  .replace(/[ً-ْـ]/g, '').replace(/[_\-–—:\.\*\(\)"']/g, ' ').replace(/\s+/g, ' ').trim();
+const IMPORT_COLS = [
+  { key: 'customer_name', label: 'اسم المستلم', req: true, alias: ['اسم المستلم', 'الاسم', 'اسم العميل', 'المستلم', 'الاسم بالكامل', 'full name', 'name', 'customer name', 'receiver name', 'consignee'] },
+  { key: 'customer_phone', label: 'رقم الهاتف', req: true, alias: ['رقم الهاتف', 'الهاتف', 'الموبايل', 'موبايل', 'التليفون', 'رقم الموبايل', 'رقم التليفون', 'phone', 'mobile', 'phone number', 'mobile number'] },
+  { key: 'customer_phone2', label: 'رقم هاتف آخر', alias: ['رقم هاتف آخر', 'هاتف آخر', 'موبايل 2', 'هاتف 2', 'رقم هاتف اخر', 'هاتف اخر', 'phone2', 'phone 2', 'second phone', 'other phone'] },
+  { key: 'governorate', label: 'المحافظة', req: true, alias: ['المحافظة', 'محافظة', 'المدينة', 'city', 'governorate', 'state', 'province'] },
+  { key: 'city', label: 'المنطقة', alias: ['المنطقة', 'منطقة', 'الحي', 'area', 'district', 'zone', 'region'] },
+  { key: 'address', label: 'العنوان', req: true, alias: ['العنوان', 'العنوان بالتفصيل', 'عنوان', 'address', 'full address'] },
+  { key: 'items', label: 'المحتوى', alias: ['المحتوى', 'محتوى الشحنة', 'المنتج', 'المنتجات', 'الصنف', 'shipment contents', 'contents', 'items', 'product', 'products', 'description'] },
+  { key: 'pieces', label: 'عدد القطع', alias: ['عدد القطع', 'الكمية', 'القطع', 'عدد', 'pieces', 'quantity', 'qty'] },
+  { key: 'cod_amount', label: 'المبلغ المطلوب تحصيله', req: true, alias: ['المبلغ المطلوب تحصيله', 'المطلوب تحصيله', 'المبلغ', 'مبلغ التحصيل', 'التحصيل', 'الاجمالي', 'السعر', 'total amount', 'cod amount', 'amount', 'total', 'price'] },
+  { key: 'client_ref', label: 'رقم الطلب لديك', alias: ['رقم الطلب لديك', 'رقم الطلب', 'رقم الاوردر', 'مرجع', 'reference id', 'reference', 'order id', 'order number', 'order no'] },
+  { key: 'notes', label: 'ملاحظات', alias: ['ملاحظات', 'ملاحظه', 'notes', 'note', 'comments', 'comment'] },
+  { key: 'allow_open', label: 'يسمح بالفتح', alias: ['يسمح بالفتح', 'مسموح بالفتح', 'فتح الشحنه', 'السماح بالفتح', 'allow open', 'open package'] },
+];
+const GOV_ALIAS = {
+  'cairo': 'القاهرة', 'giza': 'الجيزة', 'alexandria': 'الإسكندرية', 'alex': 'الإسكندرية', 'qalyubia': 'القليوبية', 'qalubia': 'القليوبية',
+  'sharqia': 'الشرقية', 'sharkia': 'الشرقية', 'dakahlia': 'الدقهلية', 'gharbia': 'الغربية', 'monufia': 'المنوفية', 'menoufia': 'المنوفية',
+  'beheira': 'البحيرة', 'kafr el sheikh': 'كفر الشيخ', 'damietta': 'دمياط', 'port said': 'بورسعيد', 'ismailia': 'الإسماعيلية',
+  'suez': 'السويس', 'fayoum': 'الفيوم', 'faiyum': 'الفيوم', 'beni suef': 'بني سويف', 'minya': 'المنيا', 'assiut': 'أسيوط', 'asyut': 'أسيوط',
+  'sohag': 'سوهاج', 'qena': 'قنا', 'luxor': 'الأقصر', 'aswan': 'أسوان', 'red sea': 'البحر الأحمر', 'new valley': 'الوادي الجديد',
+  'matrouh': 'مطروح', 'north sinai': 'شمال سيناء', 'south sinai': 'جنوب سيناء',
+  'اكتوبر': 'الجيزة', '6 اكتوبر': 'الجيزة', 'السادس من اكتوبر': 'الجيزة', 'الشيخ زايد': 'الجيزة', 'شرم الشيخ': 'جنوب سيناء', 'الغردقه': 'البحر الأحمر',
+};
+const govKey = v => normAr(v).replace(/^محافظه\s*/, '').split(' ').map(w => w.replace(/^ال/, '')).join('');
+const GOV_INDEX = (() => {
+  const m = {};
+  GOVS.forEach(g => { m[govKey(g)] = g; });
+  Object.entries(GOV_ALIAS).forEach(([k, g]) => { m[govKey(k)] = g; m[normAr(k)] = g; });
+  return m;
+})();
+const matchGov = v => GOV_INDEX[normAr(v)] || GOV_INDEX[govKey(v)] || null;
+const normPhone = v => {
+  let p = toLatinDigits(v).replace(/[^\d+]/g, '');
+  if (p.startsWith('+20')) p = '0' + p.slice(3);
+  else if (p.startsWith('0020')) p = '0' + p.slice(4);
+  else if (p.startsWith('20') && p.length === 12) p = '0' + p.slice(2);
+  if (/^1\d{9}$/.test(p)) p = '0' + p;
+  return p;
+};
+const parseAmount = v => { const n = parseFloat(toLatinDigits(v).replace(/[^\d.\-]/g, '')); return isNaN(n) ? null : n; };
+const parseYes = v => /^(نعم|ايوه|اه|yes|y|true|1|مسموح|يسمح)$/.test(normAr(v));
+
+function downloadTemplate() {
+  const head = IMPORT_COLS.map(c => c.label);
+  const ex = ['محمد أحمد', '01012345678', '', 'القاهرة', 'مدينة نصر', '10 شارع عباس العقاد، الدور الثالث', 'سلسلة فضة', 1, 450, '1001', 'الاتصال قبل التوصيل', 'لا'];
+  const ws = XLSX.utils.aoa_to_sheet([head, ex]);
+  ws['!cols'] = head.map((h, i) => ({ wch: i === 5 ? 40 : Math.max(14, h.length + 4) }));
+  const gs = XLSX.utils.aoa_to_sheet([['المحافظات المتاحة'], ...GOVS.map(g => [g])]);
+  gs['!cols'] = [{ wch: 22 }];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'الطلبات');
+  XLSX.utils.book_append_sheet(wb, gs, 'المحافظات');
+  wb.Workbook = { Views: [{ RTL: true }] };
+  XLSX.writeFile(wb, 'operative-orders-template.xlsx');
+}
+
+function readSheetRows(buf) {
+  const wb = XLSX.read(buf, { type: 'array' });
+  for (const name of wb.SheetNames) {
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, raw: false, defval: '' });
+    for (let h = 0; h < Math.min(rows.length, 6); h++) {
+      const map = {};
+      rows[h].forEach((cell, i) => {
+        const n = normAr(cell); if (!n) return;
+        const col = IMPORT_COLS.find(c => !(c.key in map) && c.alias.some(a => normAr(a) === n));
+        if (col) map[col.key] = i;
+      });
+      if (Object.keys(map).length >= 3) return { map, rows: rows.slice(h + 1).filter(r => r.some(x => String(x).trim() !== '')) };
+    }
+  }
+  return null;
+}
+
+function buildImportRows(sheet) {
+  const { map, rows } = sheet;
+  const get = (r, k) => map[k] === undefined ? '' : String(r[map[k]] ?? '').trim();
+  return rows.map((r, i) => {
+    const o = {
+      line: i + 1,
+      customer_name: get(r, 'customer_name'),
+      customer_phone: normPhone(get(r, 'customer_phone')),
+      customer_phone2: normPhone(get(r, 'customer_phone2')) || null,
+      govRaw: get(r, 'governorate'),
+      governorate: matchGov(get(r, 'governorate')),
+      city: get(r, 'city') || null,
+      address: get(r, 'address').replace(/\s+/g, ' ').replace(/^["'«]+|["'»]+$/g, '').trim(),
+      items: get(r, 'items') || null,
+      pieces: parseInt(toLatinDigits(get(r, 'pieces'))) || 1,
+      cod_amount: parseAmount(get(r, 'cod_amount')),
+      client_ref: get(r, 'client_ref') || null,
+      notes: get(r, 'notes') || null,
+      allow_open: parseYes(get(r, 'allow_open')),
+    };
+    validateImportRow(o);
+    return o;
+  });
+}
+function validateImportRow(o) {
+  const e = [];
+  if (!o.customer_name) e.push('الاسم ناقص');
+  if (!/^0\d{9,10}$/.test(o.customer_phone)) e.push('رقم الهاتف غير صحيح');
+  if (!o.address) e.push('العنوان ناقص');
+  if (o.cod_amount === null) e.push('المبلغ غير صحيح');
+  if (!o.governorate) e.push(o.govRaw ? 'اختر المحافظة' : 'المحافظة ناقصة');
+  o.errors = e;
+}
+
+function openImport() {
+  const A = S.isAdmin;
+  const m = modal({ title: 'رفع طلبات من ملف Excel', wide: true, body: `
+    <div class="import-steps">
+      <div class="alert info">
+        <b>الخطوات:</b> ١) نزّل النموذج واملأه بالطلبات، صف لكل طلب. ٢) ارفع الملف. ٣) راجع الطلبات واضغط "إضافة".
+        <div class="small" style="margin-top:6px">يمكنك أيضًا رفع ملف بأعمدة مختلفة؛ سيتعرّف النظام على الأعمدة المعروفة مثل الاسم والهاتف والعنوان والمحافظة والمبلغ.</div>
+      </div>
+      <div class="toolbar">
+        ${A ? clientSelect('impClient', '— اختر العميل —', OF.client) : ''}
+        <button class="btn" id="impTpl">تنزيل النموذج</button>
+        <label class="btn primary" style="cursor:pointer">اختيار الملف<input type="file" id="impFile" accept=".xlsx,.xls,.csv" hidden></label>
+        <span class="muted small" id="impName"></span>
+      </div>
+      <div id="impBody"></div>
+    </div>`,
+    footer: '<button class="btn primary" id="impSave" disabled>إضافة الطلبات</button><span class="spacer"></span><span class="muted small" id="impCount"></span>' });
+  let rows = [];
+  const render = () => {
+    const ok = rows.filter(r => !r.errors.length), bad = rows.length - ok.length;
+    $('#impCount', m.el).textContent = rows.length ? `${ok.length} جاهز${bad ? ` — ${bad} يحتاج تصحيح` : ''}` : '';
+    $('#impSave', m.el).disabled = !ok.length;
+    $('#impSave', m.el).textContent = ok.length ? `إضافة ${ok.length} طلب` : 'إضافة الطلبات';
+    if (!rows.length) return;
+    $('#impBody', m.el).innerHTML = `
+      ${bad ? `<div class="alert">يوجد ${bad} صف يحتاج تصحيحًا (باللون الأحمر). الصفوف الصحيحة فقط هي التي ستُضاف — يمكنك تصحيح الملف ورفعه من جديد.</div>` : '<div class="alert ok">كل الصفوف سليمة ✓</div>'}
+      <div class="table-wrap" style="max-height:52vh;overflow:auto;border:1px solid var(--border);border-radius:8px">
+      <table class="t"><thead><tr><th>#</th><th>المستلم</th><th>الهاتف</th><th>المحافظة</th><th class="hide-sm">العنوان</th><th>المبلغ</th><th>الحالة</th></tr></thead><tbody>
+      ${rows.map((r, i) => `<tr class="${r.errors.length ? 'row-err' : ''}">
+        <td class="num muted">${r.line}</td><td>${esc(r.customer_name)}</td><td><span class="ltr">${esc(r.customer_phone)}</span></td>
+        <td>${r.governorate && !r.govFixed ? esc(r.governorate)
+          : `<select class="impGov" data-i="${i}" style="min-width:120px">${govOptions(r.governorate)}</select>${r.govRaw ? `<div class="muted small">في الملف: ${esc(r.govRaw)}</div>` : ''}`}</td>
+        <td class="hide-sm small">${esc(r.address).slice(0, 60)}</td><td class="num">${r.cod_amount ?? ''}</td>
+        <td>${r.errors.length ? `<span class="neg small">${r.errors.join('، ')}</span>` : '<span class="pos">✓</span>'}</td></tr>`).join('')}
+      </tbody></table></div>`;
+    $$('.impGov', m.el).forEach(sel => sel.onchange = () => {
+      const r = rows[+sel.dataset.i]; r.governorate = sel.value || null; r.govFixed = true; validateImportRow(r); render();
+    });
+  };
+  $('#impTpl', m.el).onclick = e => busy(e.currentTarget, async () => { try { await loadXLSX(); downloadTemplate(); } catch (err) { fail(err); } });
+  $('#impFile', m.el).onchange = async e => {
+    const file = e.target.files[0]; if (!file) return;
+    $('#impName', m.el).textContent = file.name;
+    $('#impBody', m.el).innerHTML = '<div class="empty">جارٍ قراءة الملف...</div>';
+    try {
+      await loadXLSX();
+      const sheet = readSheetRows(await file.arrayBuffer());
+      if (!sheet) { rows = []; render(); $('#impBody', m.el).innerHTML = '<div class="alert">لم يتم التعرّف على أعمدة الملف. استخدم النموذج، أو تأكد أن أول صف فيه عناوين الأعمدة (الاسم، الهاتف، العنوان، المحافظة، المبلغ).</div>'; return; }
+      rows = buildImportRows(sheet);
+      rows.forEach(r => { if (!r.governorate) r.govFixed = true; });
+      if (!rows.length) { $('#impBody', m.el).innerHTML = '<div class="alert">الملف لا يحتوي على طلبات.</div>'; }
+      render();
+    } catch (err) { fail(err); $('#impBody', m.el).innerHTML = ''; }
+    e.target.value = '';
+  };
+  $('#impSave', m.el).onclick = e => {
+    const clientId = A ? $('#impClient', m.el).value : S.profile.client_id;
+    if (!clientId) return toast('اختر العميل أولًا', 'err');
+    const ok = rows.filter(r => !r.errors.length);
+    const btn = e.currentTarget;
+    busy(btn, async () => {
+      let done = 0;
+      for (let i = 0; i < ok.length; i += 100) {
+        const chunk = ok.slice(i, i + 100).map(r => ({
+          client_id: clientId, customer_name: r.customer_name, customer_phone: r.customer_phone, customer_phone2: r.customer_phone2,
+          governorate: r.governorate, city: r.city, address: r.address, items: r.items, pieces: r.pieces,
+          cod_amount: r.cod_amount, client_ref: r.client_ref, notes: r.notes, allow_open: r.allow_open }));
+        const { error } = await sb.from('orders').insert(chunk);
+        if (error) { fail(error); if (done) toast(`تمت إضافة ${done} طلب قبل حدوث الخطأ`, 'ok'); loadOrders(); return; }
+        done += chunk.length; btn.textContent = `جارٍ الإضافة... ${done}/${ok.length}`;
+      }
+      toast(`تمت إضافة ${done} طلب`, 'ok'); m.close(); loadOrders();
+    });
+  };
+}
+
+// =====================================================================
 //  العملاء (للأدمن)
 // =====================================================================
 async function viewClients() {
@@ -490,18 +693,18 @@ async function viewClients() {
   const { data: profs } = await sb.from('profiles').select('client_id,email').eq('role', 'client');
   const hasLogin = new Set((profs || []).map(p => p.client_id).filter(Boolean));
   $('#view').innerHTML = `<div class="panel"><div class="table-wrap"><table class="t"><thead><tr>
-    <th class="hide-sm">الرمز</th><th>العلامة التجارية</th><th class="hide-sm">المسؤول</th><th class="hide-sm">الهاتف</th><th class="hide-sm">التجهيز</th><th class="hide-sm">عمولة التحصيل</th>
+    <th class="hide-sm">الرمز</th><th>العلامة التجارية</th><th class="hide-sm">المسؤول</th><th class="hide-sm">الهاتف</th><th class="hide-sm">التجهيز</th>
     <th class="hide-sm">المرتجع الأساسي</th><th class="hide-sm">الشحن الأساسي</th><th>حساب الدخول</th><th></th></tr></thead><tbody>
     ${S.clients.map(c => `<tr data-id="${c.id}">
       <td class="num muted hide-sm">${c.code}</td>
       <td><b>${esc(c.name)}</b>${c.active ? '' : ' <span class="badge b-muted">موقوف</span>'}</td>
       <td class="hide-sm">${esc(c.contact_name || '')}</td><td class="hide-sm"><span class="ltr">${esc(c.phone || '')}</span></td>
-      <td class="num hide-sm">${money(c.fulfillment_fee)}</td><td class="num hide-sm">${money(c.cod_fee_percent)}%</td>
+      <td class="num hide-sm">${money(c.fulfillment_fee)}</td>
       <td class="num hide-sm">${money(c.return_fee)}</td><td class="num hide-sm">${money(c.default_shipping_fee)}</td>
       <td>${hasLogin.has(c.id) ? `<span class="badge b-green">مفعّل</span> <span class="muted small ltr">${esc(c.login_email)}</span>`
         : `<button class="btn sm" data-login>إنشاء حساب</button>`}</td>
       <td><button class="btn sm" data-edit>تعديل</button></td></tr>`).join('')
-      || '<tr><td colspan="10" class="empty">لا يوجد عملاء بعد، اضغط "عميل جديد"</td></tr>'}
+      || '<tr><td colspan="9" class="empty">لا يوجد عملاء بعد، اضغط "عميل جديد"</td></tr>'}
     </tbody></table></div></div>`;
   $$('#view tr[data-id]').forEach(tr => {
     const c = S.clients.find(x => x.id === tr.dataset.id);
@@ -511,7 +714,7 @@ async function viewClients() {
 }
 
 async function openClient(c) {
-  const isNew = !c; c = c || { active: true, fulfillment_fee: 0, cod_fee_percent: 0, return_fee: 0, default_shipping_fee: 0 };
+  const isNew = !c; c = c || { active: true, fulfillment_fee: 0, return_fee: 0, default_shipping_fee: 0 };
   let rates = {};
   if (!isNew) {
     const { data } = await sb.from('client_shipping_rates').select('*').eq('client_id', c.id);
@@ -527,13 +730,12 @@ async function openClient(c) {
       <label class="chk"><input type="checkbox" name="active" ${c.active ? 'checked' : ''}> العميل نشط</label>
     </div>
     <div class="section-title">الأسعار الخاصة بالعميل (بالجنيه)</div>
-    <div class="grid g4">
+    <div class="grid g3">
       <label class="f"><span>التجهيز والتغليف / طلب</span><input name="fulfillment_fee" type="number" step="0.01" min="0" value="${esc(c.fulfillment_fee)}"></label>
-      <label class="f"><span>عمولة التحصيل %</span><input name="cod_fee_percent" type="number" step="0.01" min="0" value="${esc(c.cod_fee_percent)}"></label>
       <label class="f"><span>سعر المرتجع الأساسي</span><input name="return_fee" type="number" step="0.01" min="0" value="${esc(c.return_fee)}"></label>
       <label class="f"><span>سعر الشحن الأساسي</span><input name="default_shipping_fee" type="number" step="0.01" min="0" value="${esc(c.default_shipping_fee)}"></label>
     </div>
-    <p class="hint">سعر المرتجع = إجمالي المبلغ الذي يُخصم من العميل عن الطلب المرتجع.</p>
+    <p class="hint">الطلب المسلَّم: التكلفة = الشحن + التجهيز. الطلب المرتجع: التكلفة = المرتجع + التجهيز. الصافي للعميل = المبلغ المحصّل − التكلفة.</p>
     <div class="section-title">أسعار كل محافظة <span class="hint">— الخانة الفارغة تأخذ السعر الأساسي</span></div>
     <div class="table-wrap" style="max-height:46vh;overflow:auto;border:1px solid var(--border);border-radius:8px">
     <table class="t rates"><thead><tr><th>المحافظة</th><th>الشحن</th><th>المرتجع</th></tr></thead><tbody>
@@ -551,7 +753,7 @@ async function openClient(c) {
     if (!form.reportValidity()) return;
     const f = formValues(form);
     const rec = { name: f.name, contact_name: nz(f.contact_name), phone: nz(f.phone), pickup_address: nz(f.pickup_address),
-      notes: nz(f.notes), active: f.active, fulfillment_fee: num(f.fulfillment_fee), cod_fee_percent: num(f.cod_fee_percent),
+      notes: nz(f.notes), active: f.active, fulfillment_fee: num(f.fulfillment_fee),
       return_fee: num(f.return_fee), default_shipping_fee: num(f.default_shipping_fee) };
     busy(e.currentTarget, async () => {
       const res = isNew ? await sb.from('clients').insert(rec).select().single()
@@ -628,7 +830,7 @@ async function viewSettlements() {
     const { data, error } = await q;
     if (error) return fail(error);
     $('#sPanel').innerHTML = `<div class="table-wrap"><table class="t"><thead><tr><th>رقم</th>${S.isAdmin ? '<th>العميل</th>' : ''}
-      <th class="hide-sm">التاريخ</th><th class="hide-sm">الطلبات</th><th class="hide-sm">المحصّل</th><th class="hide-sm">الرسوم</th><th>الصافي للعميل</th><th>الحالة</th></tr></thead><tbody>
+      <th class="hide-sm">التاريخ</th><th class="hide-sm">الطلبات</th><th class="hide-sm">المحصّل</th><th class="hide-sm">التكلفة</th><th>الصافي للعميل</th><th>الحالة</th></tr></thead><tbody>
       ${(data || []).map(s => `<tr class="click" data-id="${s.id}"><td class="num"><b>${s.settlement_no}</b></td>
         ${S.isAdmin ? `<td>${esc(clientName(s.client_id))}</td>` : ''}<td class="num hide-sm">${dt(s.created_at)}</td>
         <td class="num hide-sm">${s.orders_count}</td><td class="num hide-sm">${money(s.total_collected)}</td><td class="num hide-sm">${money(s.total_fees)}</td>
@@ -641,12 +843,13 @@ async function viewSettlements() {
   await load();
 }
 
-const feeRow = o => `<td class="num">${money(o.status === 'delivered' ? o.collected_amount : 0)}</td>
+const orderCost = o => o.status === 'returned' ? +o.return_fee + +o.fulfillment_fee : +o.shipping_fee + +o.fulfillment_fee;
+const feeRow = o => `<td class="num">${money(o.collected_amount)}</td>
   <td class="num">${o.status === 'delivered' ? money(o.shipping_fee) : '—'}</td>
-  <td class="num">${o.status === 'delivered' ? money(o.fulfillment_fee) : '—'}</td>
-  <td class="num">${o.status === 'delivered' ? money(o.cod_fee) : '—'}</td>
-  <td class="num">${o.status === 'returned' ? money(o.return_fee) : '—'}</td><td>${signed(o.net_amount)}</td>`;
-const feeHead = '<th>المحصّل</th><th>الشحن</th><th>التجهيز</th><th>عمولة</th><th>مرتجع</th><th>الصافي</th>';
+  <td class="num">${o.status === 'returned' ? money(o.return_fee) : '—'}</td>
+  <td class="num">${money(o.fulfillment_fee)}</td>
+  <td class="num">${money(orderCost(o))}</td><td>${signed(o.net_amount)}</td>`;
+const feeHead = '<th>المحصّل</th><th>الشحن</th><th>المرتجع</th><th>التجهيز</th><th>التكلفة</th><th>الصافي</th>';
 
 function newSettlement() {
   const m = modal({ title: 'تسوية جديدة', wide: true,
@@ -656,10 +859,10 @@ function newSettlement() {
   const recalc = () => {
     const ids = $$('.nsSel:checked', m.el).map(c => c.value);
     const sel = rows.filter(r => ids.includes(r.id));
-    const col = sel.reduce((a, o) => a + (o.status === 'delivered' ? +o.collected_amount : 0), 0);
+    const col = sel.reduce((a, o) => a + +o.collected_amount, 0);
     const net = sel.reduce((a, o) => a + +o.net_amount, 0);
     $('#nsTot', m.el).innerHTML = `<div><span class="muted small">عدد الطلبات</span><b>${sel.length}</b></div>
-      <div><span class="muted small">المحصّل</span><b>${egp(col)}</b></div><div><span class="muted small">الرسوم</span><b>${egp(col - net)}</b></div>
+      <div><span class="muted small">المحصّل</span><b>${egp(col)}</b></div><div><span class="muted small">التكلفة</span><b>${egp(col - net)}</b></div>
       <div><span class="muted small">الصافي للعميل</span><b>${egp(net)}</b></div>`;
     $('#nsSave', m.el).disabled = !sel.length;
   };
@@ -699,7 +902,7 @@ async function openSettlement(s, reload) {
       <dt>التاريخ</dt><dd>${dt(s.created_at)}</dd><dt>الحالة</dt><dd>${s.status === 'paid' ? `مدفوعة ${dt(s.paid_at)}${s.payment_ref ? ' — ' + esc(s.payment_ref) : ''}` : 'غير مدفوعة'}</dd></dl></div>
     <div class="stmt-totals"><div><span class="muted small">عدد الطلبات</span><b>${s.orders_count}</b></div>
       <div><span class="muted small">إجمالي المحصّل</span><b>${egp(s.total_collected)}</b></div>
-      <div><span class="muted small">إجمالي الرسوم</span><b>${egp(s.total_fees)}</b></div>
+      <div><span class="muted small">إجمالي التكلفة</span><b>${egp(s.total_fees)}</b></div>
       <div><span class="muted small">الصافي للعميل</span><b>${egp(s.net_amount)}</b></div></div>
     <table class="t"><thead><tr><th>رقم</th><th>المستلم</th><th>المحافظة</th><th>الحالة</th>${feeHead}</tr></thead>
     <tbody>${(orders || []).map(o => `<tr><td class="num">${orderNo(o)}${o.client_ref ? ` <span class="muted small">(${esc(o.client_ref)})</span>` : ''}</td>

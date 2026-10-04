@@ -208,3 +208,6 @@ table.t{width:100%;border-collapse:collapse;font-size:13.5px}
 
 .t.rates td{padding:5px 10px}
 .t.rates input{max-width:140px}
+
+.t tr.row-err{background:var(--red-50)}
+.import-steps .toolbar{margin:12px 0}
