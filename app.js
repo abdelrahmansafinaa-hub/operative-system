@@ -293,9 +293,15 @@ function ordersQuery(select = '*', withCount = true) {
 
 async function viewOrders() {
   setTitle(S.isAdmin ? 'الطلبات' : 'طلباتي');
-  $('#pageActions').innerHTML = `<button class="btn" id="exportBtn">تصدير إلى Excel</button>
+  $('#pageActions').innerHTML = `${S.isAdmin ? `<button class="btn" id="qpSyncBtn" title="جلب آخر حالات الشحنات من QP">تحديث حالات QP</button>
+    <button class="btn ghost" id="qpSetBtn">إعدادات QP</button>` : ''}
+    <button class="btn" id="exportBtn">تصدير إلى Excel</button>
     <button class="btn" id="importBtn">رفع طلبات من Excel</button>
     <button class="btn primary" id="addOrderBtn">+ طلب جديد</button>`;
+  if (S.isAdmin) {
+    $('#qpSyncBtn').onclick = e => busy(e.currentTarget, qpSyncNow);
+    $('#qpSetBtn').onclick = openQpSettings;
+  }
   $('#addOrderBtn').onclick = () => openOrder(null);
   $('#importBtn').onclick = openImport;
   $('#exportBtn').onclick = e => busy(e.currentTarget, exportOrders);
@@ -329,7 +335,7 @@ async function loadOrders() {
       <td>${esc(o.customer_name)}<div class="muted small"><span class="ltr">${esc(o.customer_phone)}</span></div></td>
       <td class="hide-sm">${esc(o.governorate)}<div class="muted small">${esc(o.city || '')}</div></td>
       <td class="num">${money(o.cod_amount)}</td><td>${badge(o.status)}</td>
-      <td class="small hide-sm"><span class="ltr">${esc(o.qp_tracking || '')}</span></td><td class="num small hide-sm">${dt(o.created_at)}</td></tr>`).join('')
+      <td class="small hide-sm"><span class="ltr">${esc(o.qp_tracking || '')}</span>${o.qp_status ? `<div class="muted small">${esc(o.qp_status)}</div>` : ''}</td><td class="num small hide-sm">${dt(o.created_at)}</td></tr>`).join('')
       || `<tr><td colspan="9" class="empty">لا توجد طلبات${OF.q || OF.status || OF.client ? ' مطابقة للبحث' : ' بعد'}</td></tr>`}
     </tbody></table></div>
     <div class="pager"><span>${count ? `${from + 1}–${from + rows.length} من ${count}` : ''}</span>
@@ -354,16 +360,106 @@ function renderBulk() {
   const el = $('#bulk'); if (!el) return;
   if (!S.isAdmin || !selected.size) { el.innerHTML = ''; return; }
   el.innerHTML = `<div class="bulkbar"><b>تم تحديد ${selected.size} طلب</b>
+    <button class="btn primary sm" id="bulkQp">إرسال إلى QP</button>
+    <span class="sep"></span>
     <span>تغيير الحالة إلى:</span><select id="bulkStatus">${statusOptions('shipped')}</select>
-    <button class="btn primary sm" id="bulkApply">تطبيق</button>
+    <button class="btn sm" id="bulkApply">تطبيق</button>
     <button class="btn ghost sm" id="bulkClear">إلغاء التحديد</button></div>`;
   $('#bulkClear').onclick = () => { selected.clear(); loadOrders(); };
+  $('#bulkQp').onclick = sendToQp;
   $('#bulkApply').onclick = e => busy(e.currentTarget, async () => {
     const st = $('#bulkStatus').value;
     const { error } = await sb.from('orders').update({ status: st }).in('id', [...selected]);
     if (error) return fail(error);
     toast(`تم تغيير حالة ${selected.size} طلب`, 'ok'); selected.clear(); loadOrders();
   });
+}
+
+// =====================================================================
+//  الربط مع QP Express
+// =====================================================================
+async function sendToQp() {
+  const ids = [...selected];
+  const { data, error } = await sb.from('orders').select('id, order_no, status, qp_tracking, customer_name, governorate')
+    .in('id', ids).order('order_no');
+  if (error) return fail(error);
+  const ok = (data || []).filter(o => ['new', 'processing'].includes(o.status) && !o.qp_tracking);
+  const skip = (data || []).length - ok.length;
+  if (!ok.length) return toast('لا توجد طلبات صالحة للإرسال — يُرسل فقط الطلب الجديد أو قيد التجهيز الذي ليس له رقم تتبع', 'err');
+  if (!await confirmBox(`سيتم إرسال <b>${ok.length}</b> طلب إلى QP${skip ? ` (وسيتم تخطي ${skip} طلب سبق إرساله أو حالته لا تسمح)` : ''}. هل تريد المتابعة؟`, 'إرسال')) return;
+
+  const m = modal({ title: 'إرسال الطلبات إلى QP', wide: true,
+    body: `<div class="qp-prog"><div class="bar"><i id="qpBar"></i></div><div id="qpCount" class="muted small">0 / ${ok.length}</div></div>
+      <div class="table-wrap"><table class="t"><thead><tr><th>الطلب</th><th>المستلم</th><th>النتيجة</th></tr></thead>
+      <tbody id="qpRes">${ok.map(o => `<tr data-id="${o.id}"><td class="num"><b>${orderNo(o)}</b></td><td>${esc(o.customer_name)}
+        <div class="muted small">${esc(o.governorate)}</div></td><td class="r muted">في الانتظار...</td></tr>`).join('')}</tbody></table></div>`,
+    footer: `<button class="btn primary" id="qpDone" disabled>إغلاق</button>` });
+  let done = 0, good = 0;
+  for (const o of ok) {
+    const cell = $(`#qpRes tr[data-id="${o.id}"] .r`, m.el);
+    cell.textContent = 'جارٍ الإرسال...';
+    try {
+      const { data: r, error: e } = await sb.rpc('qp_send_order', { p_id: o.id });
+      if (e) throw e;
+      if (r && r.ok) {
+        good++;
+        cell.className = 'r ok-txt';
+        cell.innerHTML = r.serial ? `تم ✓ رقم التتبع <span class="ltr"><b>${esc(r.serial)}</b></span>` : esc(r.msg || 'تم');
+      } else { cell.className = 'r err-txt'; cell.textContent = (r && r.msg) || 'فشل'; }
+    } catch (e) {
+      cell.className = 'r err-txt'; cell.textContent = errMsg(e);
+      if (/بيانات حساب QP|كلمة مرور|تسجيل الدخول/.test(errMsg(e))) {   // لا داعي لإكمال الباقي
+        $$('#qpRes .r.muted', m.el).forEach(c => { c.textContent = 'لم يُرسل'; });
+        done = ok.length; break;
+      }
+    }
+    done++;
+    $('#qpBar', m.el).style.width = `${Math.round(done * 100 / ok.length)}%`;
+    $('#qpCount', m.el).textContent = `${done} / ${ok.length}`;
+  }
+  $('#qpBar', m.el).style.width = '100%';
+  $('#qpCount', m.el).innerHTML = `<b>تم إرسال ${good} من ${ok.length} طلب</b>`;
+  const btn = $('#qpDone', m.el); btn.disabled = false;
+  btn.onclick = () => { m.close(); selected.clear(); loadOrders(); };
+  $('.x', m.el).onclick = btn.onclick;
+}
+
+async function qpSyncNow() {
+  const { data, error } = await sb.rpc('qp_sync_now');
+  if (error) return fail(error);
+  if (!data.ok) return toast('تعذّر التحديث: ' + data.msg, 'err');
+  toast(data.active ? `تم تحديث حالات ${data.found} شحنة من QP` : 'لا توجد شحنات نشطة لتحديثها', 'ok');
+  loadOrders();
+}
+
+async function openQpSettings() {
+  const { data: s, error } = await sb.rpc('qp_get_settings');
+  if (error) return fail(error);
+  const m = modal({ title: 'إعدادات الربط مع QP',
+    body: `<form id="qpForm" class="grid">
+      <p class="hint" style="margin:0">أدخل بيانات حساب الشركة على موقع QP Express. تُحفظ كلمة المرور مشفّرة ولا يمكن عرضها مرة أخرى.</p>
+      <label class="f"><span>اسم المستخدم / البريد في QP *</span><input name="username" dir="ltr" required autocomplete="off" value="${esc(s.username || '')}"></label>
+      <label class="f"><span>كلمة المرور ${s.has_password ? '<span class="hint">(محفوظة — اتركها فارغة إن لم تتغير)</span>' : '*'}</span>
+        <input name="password" type="password" dir="ltr" autocomplete="new-password" ${s.has_password ? '' : 'required'}></label>
+      <label class="chk"><input type="checkbox" name="auto_sync" ${s.auto_sync !== false ? 'checked' : ''}> تحديث حالات الشحنات تلقائيًا كل ساعة</label>
+      <dl class="kv small"><dt>رقم الحساب في QP</dt><dd class="ltr">${esc(s.customer_id || '—')}</dd>
+        <dt>آخر تحديث</dt><dd>${s.last_sync_at ? dtt(s.last_sync_at) : '—'}</dd>
+        <dt>النتيجة</dt><dd>${esc(s.last_sync_msg || '—')}</dd></dl>
+    </form>`,
+    footer: `<button class="btn primary" id="qpSave">حفظ واختبار الاتصال</button><button class="btn" id="qpClose">إغلاق</button>` });
+  $('#qpClose', m.el).onclick = m.close;
+  $('#qpSave', m.el).onclick = e => {
+    const form = $('#qpForm', m.el);
+    if (!form.reportValidity()) return;
+    const f = formValues(form);
+    busy(e.currentTarget, async () => {
+      const { error: e1 } = await sb.rpc('qp_save_settings', { p_username: f.username.trim(), p_password: form.elements.password.value || null, p_auto_sync: f.auto_sync });
+      if (e1) return fail(e1);
+      const { data: t, error: e2 } = await sb.rpc('qp_test');
+      if (e2) return toast('تم الحفظ، لكن ' + errMsg(e2), 'err');
+      toast(`تم الاتصال بـ QP بنجاح (رقم الحساب ${t.customer_id})`, 'ok'); m.close();
+    });
+  };
 }
 
 async function exportOrders() {

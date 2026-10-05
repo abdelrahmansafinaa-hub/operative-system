@@ -110,6 +110,11 @@ table.t{width:100%;border-collapse:collapse;font-size:13.5px}
 .bulkbar{display:flex;gap:10px;align-items:center;background:var(--primary-50);border:1px solid #cdd8f5;
   padding:8px 12px;border-radius:8px;margin-bottom:12px;flex-wrap:wrap}
 .bulkbar select{width:auto}
+.bulkbar .sep{width:1px;height:22px;background:#cdd8f5}
+.ok-txt{color:var(--green);font-weight:600} .err-txt{color:var(--red)}
+.qp-prog{display:flex;align-items:center;gap:12px;margin-bottom:12px}
+.qp-prog .bar{flex:1;height:8px;background:var(--primary-50);border-radius:99px;overflow:hidden}
+.qp-prog .bar i{display:block;height:100%;width:0;background:var(--primary);transition:width .3s}
 
 /* ---------- Modal ---------- */
 .modal-bg{position:fixed;inset:0;background:rgba(15,22,40,.45);display:flex;align-items:flex-start;justify-content:center;
