@@ -378,6 +378,20 @@ function renderBulk() {
 // =====================================================================
 //  الربط مع QP Express
 // =====================================================================
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// تجهيز جلسة QP (تسجيل الدخول يتم في الخلفية، نكرر السؤال حتى يجهز)
+async function qpEnsureLogin() {
+  for (let i = 0; i < 40; i++) {
+    const { data, error } = await sb.rpc('qp_login');
+    if (error) throw error;
+    if (data.state === 'ready') return data;
+    if (data.state === 'error') throw new Error(data.msg);
+    await sleep(i < 5 ? 600 : 1200);
+  }
+  throw new Error('انتهت مهلة الاتصال بـ QP، حاول مرة أخرى');
+}
+
 async function sendToQp() {
   const ids = [...selected];
   const { data, error } = await sb.from('orders').select('id, order_no, status, qp_tracking, customer_name, governorate')
@@ -389,42 +403,60 @@ async function sendToQp() {
   if (!await confirmBox(`سيتم إرسال <b>${ok.length}</b> طلب إلى QP${skip ? ` (وسيتم تخطي ${skip} طلب سبق إرساله أو حالته لا تسمح)` : ''}. هل تريد المتابعة؟`, 'إرسال')) return;
 
   const m = modal({ title: 'إرسال الطلبات إلى QP', wide: true,
-    body: `<div class="qp-prog"><div class="bar"><i id="qpBar"></i></div><div id="qpCount" class="muted small">0 / ${ok.length}</div></div>
+    body: `<div class="qp-prog"><div class="bar"><i id="qpBar"></i></div><div id="qpCount" class="muted small">جارٍ الاتصال بـ QP...</div></div>
       <div class="table-wrap"><table class="t"><thead><tr><th>الطلب</th><th>المستلم</th><th>النتيجة</th></tr></thead>
       <tbody id="qpRes">${ok.map(o => `<tr data-id="${o.id}"><td class="num"><b>${orderNo(o)}</b></td><td>${esc(o.customer_name)}
         <div class="muted small">${esc(o.governorate)}</div></td><td class="r muted">في الانتظار...</td></tr>`).join('')}</tbody></table></div>`,
     footer: `<button class="btn primary" id="qpDone" disabled>إغلاق</button>` });
-  let done = 0, good = 0;
+  const cell = id => $(`#qpRes tr[data-id="${id}"] .r`, m.el);
+  const setCell = (id, cls, html) => { const c = cell(id); if (c) { c.className = 'r ' + cls; c.innerHTML = html; } };
+  const progress = (n, label) => { $('#qpBar', m.el).style.width = `${Math.round(n * 100 / ok.length)}%`; $('#qpCount', m.el).innerHTML = label; };
+  const finish = () => {
+    const btn = $('#qpDone', m.el); btn.disabled = false;
+    btn.onclick = () => { m.close(); selected.clear(); loadOrders(); };
+    $('.x', m.el).onclick = btn.onclick;
+  };
+
+  try { await qpEnsureLogin(); }
+  catch (e) {
+    $$('#qpRes .r', m.el).forEach(c => { c.className = 'r err-txt'; c.textContent = 'لم يُرسل'; });
+    progress(0, `<span class="err-txt">${esc(errMsg(e))}</span>`); return finish();
+  }
+
+  // 1) إرسال الطلبات (تُرسل في الخلفية)
+  const queued = [];
   for (const o of ok) {
-    const cell = $(`#qpRes tr[data-id="${o.id}"] .r`, m.el);
-    cell.textContent = 'جارٍ الإرسال...';
+    setCell(o.id, 'muted', 'جارٍ الإرسال...');
     try {
       const { data: r, error: e } = await sb.rpc('qp_send_order', { p_id: o.id });
       if (e) throw e;
-      if (r && r.ok) {
-        good++;
-        cell.className = 'r ok-txt';
-        cell.innerHTML = r.serial ? `تم ✓ رقم التتبع <span class="ltr"><b>${esc(r.serial)}</b></span>` : esc(r.msg || 'تم');
-      } else { cell.className = 'r err-txt'; cell.textContent = (r && r.msg) || 'فشل'; }
-    } catch (e) {
-      cell.className = 'r err-txt'; cell.textContent = errMsg(e);
-      if (/بيانات حساب QP|كلمة مرور|تسجيل الدخول/.test(errMsg(e))) {   // لا داعي لإكمال الباقي
-        $$('#qpRes .r.muted', m.el).forEach(c => { c.textContent = 'لم يُرسل'; });
-        done = ok.length; break;
-      }
-    }
-    done++;
-    $('#qpBar', m.el).style.width = `${Math.round(done * 100 / ok.length)}%`;
-    $('#qpCount', m.el).textContent = `${done} / ${ok.length}`;
+      if (r && r.ok) queued.push(o.id); else setCell(o.id, 'err-txt', esc((r && r.msg) || 'فشل'));
+    } catch (e) { setCell(o.id, 'err-txt', esc(errMsg(e))); }
   }
-  $('#qpBar', m.el).style.width = '100%';
-  $('#qpCount', m.el).innerHTML = `<b>تم إرسال ${good} من ${ok.length} طلب</b>`;
-  const btn = $('#qpDone', m.el); btn.disabled = false;
-  btn.onclick = () => { m.close(); selected.clear(); loadOrders(); };
-  $('.x', m.el).onclick = btn.onclick;
+  progress(0, `بانتظار رد QP... (0 / ${queued.length})`);
+
+  // 2) متابعة الردود حتى تكتمل
+  let good = 0, done = 0;
+  for (let i = 0; i < 60 && queued.length; i++) {
+    await sleep(i < 3 ? 800 : 1500);
+    const { data: rs, error: e } = await sb.rpc('qp_send_results', { p_ids: queued });
+    if (e) { fail(e); break; }
+    good = 0; done = 0;
+    rs.forEach(r => {
+      if (r.pending) return;
+      done++;
+      if (r.ok) { good++; setCell(r.id, 'ok-txt', `تم ✓ رقم التتبع <span class="ltr"><b>${esc(r.serial)}</b></span>`); }
+      else setCell(r.id, 'err-txt', esc(r.msg || 'فشل'));
+    });
+    progress(done, `بانتظار رد QP... (${done} / ${queued.length})`);
+    if (done >= queued.length) break;
+  }
+  progress(ok.length, `<b>تم إرسال ${good} من ${ok.length} طلب</b>${done < queued.length ? ' — باقي الردود ستُحدَّث تلقائيًا' : ''}`);
+  finish();
 }
 
 async function qpSyncNow() {
+  try { await qpEnsureLogin(); } catch (e) { return toast('تعذّر الاتصال بـ QP: ' + errMsg(e), 'err'); }
   const { data, error } = await sb.rpc('qp_sync_now');
   if (error) return fail(error);
   if (!data.ok) return toast('تعذّر التحديث: ' + data.msg, 'err');
@@ -455,9 +487,10 @@ async function openQpSettings() {
     busy(e.currentTarget, async () => {
       const { error: e1 } = await sb.rpc('qp_save_settings', { p_username: f.username.trim(), p_password: form.elements.password.value || null, p_auto_sync: f.auto_sync });
       if (e1) return fail(e1);
-      const { data: t, error: e2 } = await sb.rpc('qp_test');
-      if (e2) return toast('تم الحفظ، لكن ' + errMsg(e2), 'err');
-      toast(`تم الاتصال بـ QP بنجاح (رقم الحساب ${t.customer_id})`, 'ok'); m.close();
+      try {
+        const t = await qpEnsureLogin();
+        toast(`تم الاتصال بـ QP بنجاح (رقم الحساب ${t.customer_id})`, 'ok'); m.close();
+      } catch (e2) { toast('تم الحفظ، لكن ' + errMsg(e2), 'err'); }
     });
   };
 }
