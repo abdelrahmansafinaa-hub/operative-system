@@ -500,7 +500,7 @@ async function exportOrders() {
   if (error) return fail(error);
   const cols = [['order_no', 'رقم الطلب'], ['client', 'العميل'], ['client_ref', 'مرجع العميل'], ['customer_name', 'المستلم'],
     ['customer_phone', 'الهاتف'], ['customer_phone2', 'هاتف آخر'], ['governorate', 'المحافظة'], ['city', 'المنطقة'],
-    ['address', 'العنوان'], ['items', 'المحتوى'], ['pieces', 'القطع'], ['cod_amount', 'التحصيل'], ['allow_open', 'مسموح بالفتح'],
+    ['address', 'العنوان'], ['items', 'المحتوى'], ['pieces', 'القطع'], ['cod_amount', 'التحصيل'], ['allow_open', 'متاح المعاينة'],
     ['notes', 'ملاحظات'], ['status', 'الحالة'], ['qp_tracking', 'رقم التتبع'], ['collected_amount', 'المحصّل'],
     ['shipping_fee', 'الشحن'], ['fulfillment_fee', 'التجهيز'], ['return_fee', 'المرتجع'],
     ['net_amount', 'الصافي'], ['created_at', 'التاريخ']];
@@ -514,7 +514,7 @@ async function exportOrders() {
 }
 
 async function openOrder(o) {
-  const isNew = !o; o = o || { pieces: 1, allow_open: false, status: 'new' };
+  const isNew = !o; o = o || { pieces: 1, allow_open: true, status: 'new' };
   const A = S.isAdmin;
   const editable = A || isNew || o.status === 'new';
   const dis = editable ? '' : 'disabled';
@@ -532,7 +532,7 @@ async function openOrder(o) {
     <div class="grid g2"><label class="f"><span>عدد القطع</span><input name="pieces" type="number" min="1" value="${esc(o.pieces)}" ${dis}></label>
       <label class="f"><span>المطلوب تحصيله *</span><input name="cod_amount" type="number" min="0" step="0.01" required value="${esc(o.cod_amount)}" ${dis}></label></div>
     <label class="f span-all"><span>ملاحظات</span><input name="notes" value="${esc(o.notes)}" ${dis}></label>
-    <label class="chk span-all"><input type="checkbox" name="allow_open" ${o.allow_open ? 'checked' : ''} ${dis}> يُسمح للمستلم بفتح الشحنة</label>
+    <label class="chk span-all"><input type="checkbox" name="allow_open" ${o.allow_open ? 'checked' : ''} ${dis}> متاح معاينة الشحنة <span class="hint">(أزل العلامة إذا كنت لا تريد أن يفتح المستلم الشحنة قبل الاستلام)</span></label>
     ${A && !isNew ? `<div class="section-title span-all">الشحن والتحصيل</div>
       <label class="f"><span>الحالة</span><select name="status">${statusOptions(o.status)}</select></label>
       <label class="f"><span>رقم التتبع (QP)</span><input name="qp_tracking" dir="ltr" value="${esc(o.qp_tracking)}"></label>
@@ -640,7 +640,7 @@ const IMPORT_COLS = [
   { key: 'cod_amount', label: 'المبلغ المطلوب تحصيله', req: true, alias: ['المبلغ المطلوب تحصيله', 'المطلوب تحصيله', 'المبلغ', 'مبلغ التحصيل', 'التحصيل', 'الاجمالي', 'السعر', 'total amount', 'cod amount', 'amount', 'total', 'price'] },
   { key: 'client_ref', label: 'رقم الطلب لديك', alias: ['رقم الطلب لديك', 'رقم الطلب', 'رقم الاوردر', 'مرجع', 'reference id', 'reference', 'order id', 'order number', 'order no'] },
   { key: 'notes', label: 'ملاحظات', alias: ['ملاحظات', 'ملاحظه', 'notes', 'note', 'comments', 'comment'] },
-  { key: 'allow_open', label: 'يسمح بالفتح', alias: ['يسمح بالفتح', 'مسموح بالفتح', 'فتح الشحنه', 'السماح بالفتح', 'allow open', 'open package'] },
+  { key: 'allow_open', label: 'متاح المعاينة', alias: ['متاح المعاينة', 'المعاينة', 'معاينة', 'يسمح بالمعاينة', 'مسموح بالمعاينة', 'يسمح بالفتح', 'مسموح بالفتح', 'فتح الشحنه', 'السماح بالفتح', 'allow open', 'open package'] },
 ];
 const GOV_ALIAS = {
   'cairo': 'القاهرة', 'giza': 'الجيزة', 'alexandria': 'الإسكندرية', 'alex': 'الإسكندرية', 'qalyubia': 'القليوبية', 'qalubia': 'القليوبية',
@@ -669,10 +669,12 @@ const normPhone = v => {
 };
 const parseAmount = v => { const n = parseFloat(toLatinDigits(v).replace(/[^\d.\-]/g, '')); return isNaN(n) ? null : n; };
 const parseYes = v => /^(نعم|ايوه|اه|yes|y|true|1|مسموح|يسمح)$/.test(normAr(v));
+// المعاينة متاحة افتراضيًا، ولا تُغلق إلا بقيمة صريحة مثل «لا»
+const parseOpen = v => !/^(لا|لأ|no|n|false|0|ممنوع|غير مسموح|غير متاح|بدون|بدون معاينه|لا يسمح)$/.test(normAr(v));
 
 function downloadTemplate() {
   const head = IMPORT_COLS.map(c => c.label);
-  const ex = ['محمد أحمد', '01012345678', '', 'القاهرة', 'مدينة نصر', '10 شارع عباس العقاد، الدور الثالث', 'سلسلة فضة', 1, 450, '1001', 'الاتصال قبل التوصيل', 'لا'];
+  const ex = ['محمد أحمد', '01012345678', '', 'القاهرة', 'مدينة نصر', '10 شارع عباس العقاد، الدور الثالث', 'سلسلة فضة', 1, 450, '1001', 'الاتصال قبل التوصيل', 'نعم'];
   const ws = XLSX.utils.aoa_to_sheet([head, ex]);
   ws['!cols'] = head.map((h, i) => ({ wch: i === 5 ? 40 : Math.max(14, h.length + 4) }));
   const gs = XLSX.utils.aoa_to_sheet([['المحافظات المتاحة'], ...GOVS.map(g => [g])]);
@@ -719,7 +721,7 @@ function buildImportRows(sheet) {
       cod_amount: parseAmount(get(r, 'cod_amount')),
       client_ref: get(r, 'client_ref') || null,
       notes: get(r, 'notes') || null,
-      allow_open: parseYes(get(r, 'allow_open')),
+      allow_open: parseOpen(get(r, 'allow_open')),
     };
     validateImportRow(o);
     return o;
